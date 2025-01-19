@@ -1,11 +1,11 @@
 from gymnasium import spaces
 
-from envs.batched_env import SequencedBatchedEnv, ParallelBatchedEnv 
-from envs.normalize import VecNormalize
-from envs.make_env import make_env
-from envs.state import State
-from envs.transition import Transition
-from envs.evaluate import RecordScores, Evaluator
+from .batched_env import SequencedBatchedEnv, ParallelBatchedEnv 
+from .normalize import VecNormalize
+from .make_env import make_env
+from .state import State
+from .transition import Transition
+from .evaluate import RecordScores, Evaluator
 
 
 ATARI_ENVS = [

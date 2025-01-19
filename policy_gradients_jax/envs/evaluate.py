@@ -3,8 +3,8 @@ from typing import List, Tuple
 
 import gymnasium as gym
 
-from envs.base import VecEnv, VecEnvWrapper
-from envs.state import State
+from .base import VecEnv, VecEnvWrapper
+from .state import State
 
 
 

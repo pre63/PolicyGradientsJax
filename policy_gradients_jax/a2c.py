@@ -1,4 +1,4 @@
-"""Proximal Policy Optimization (PPO)."""
+"""Advantage Actor-Critic (A2C)."""
 
 from absl import logging, app
 from functools import partial
@@ -19,24 +19,24 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from envs import make_env, Transition, has_discrete_action_space, is_atari_env
-from networks.policy import Policy
-from networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
-from networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
+from .envs import make_env, Transition, has_discrete_action_space, is_atari_env
+from .networks.policy import Policy
+from .networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
+from .networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
 
 class Config:
     # experiment
-    experiment_name = 'ppo_test_video'
-    seed = 20
+    experiment_name = 'a2c_epochs2_det_1'
+    seed = 42
     platform = 'cpu' # CPU or GPU
-    capture_video = True # Not implemented
+    capture_video = False # not implemented
     write_logs_to_file = False
     save_model = False
 
     # environment
-    env_id = 'Humanoid-v4' 
+    env_id = 'HalfCheetah-v4' 
     num_envs = 8
-    parallel_envs = True 
+    parallel_envs = False 
     clip_actions = False
     normalize_observations = True 
     normalize_rewards = True
@@ -44,11 +44,11 @@ class Config:
     clip_rewards = 10.
     eval_env = True
     num_eval_episodes = 10
-    eval_every = 5
+    eval_every = 2
     deterministic_eval = True
 
     # algorithm hyperparameters
-    total_timesteps = int(1e6) * 8 
+    total_timesteps = int(1e6) * 8
     learning_rate = 3e-4 
     unroll_length = 2048 
     anneal_lr = True
@@ -56,13 +56,11 @@ class Config:
     gae_lambda = 0.95
     batch_size = 1 # number of unrolls per minibatch 
     num_minibatches = 8
-    update_epochs = 10 
+    update_epochs = 1
     normalize_advantages = True
-    clip_eps = 0.2
-    entropy_cost = 0.00 
+    entropy_cost = 0.1 
     vf_cost = 0.5
     max_grad_norm = 0.5
-    target_kl = None
     reward_scaling = 1. 
     
     # policy params
@@ -93,21 +91,21 @@ def _strip_weak_type(tree):
 
 
 @flax.struct.dataclass
-class PPONetworkParams:
+class NetworkParams:
     """Contains training state for the learner."""
     policy: Any
     value: Any
 
 
 @flax.struct.dataclass
-class PPONetworks:
+class Networks:
     policy_network: FeedForwardNetwork
     value_network: FeedForwardNetwork
     parametric_action_distribution: Union[ParametricDistribution, DiscreteDistribution]
 
 
 @flax.struct.dataclass
-class AtariPPONetworkParams:
+class AtariNetworkParams:
     """Contains training state for the learner."""
     feature_extractor: Any
     policy: Any
@@ -115,7 +113,7 @@ class AtariPPONetworkParams:
 
 
 @flax.struct.dataclass
-class AtariPPONetworks:
+class AtariNetworks:
     feature_extractor: FeedForwardNetwork
     policy_network: FeedForwardNetwork
     value_network: FeedForwardNetwork
@@ -126,24 +124,24 @@ class AtariPPONetworks:
 class TrainingState:
     """Contains training state for the learner."""
     optimizer_state: optax.OptState
-    params: Union[PPONetworkParams, AtariPPONetworkParams]
+    params: Union[NetworkParams, AtariNetworkParams]
     env_steps: jnp.ndarray
 
 
-def make_inference_fn(ppo_networks: Union[PPONetworks, AtariPPONetworks]):
-    """Creates params and inference function for the PPO agent."""
+def make_inference_fn(agent_networks: Union[Networks, AtariNetworks]):
+    """Creates params and inference function for the agent."""
 
     def make_policy(params: Any,
                     deterministic: bool = False) -> Policy:
-        policy_network = ppo_networks.policy_network
-        parametric_action_distribution = ppo_networks.parametric_action_distribution
+        policy_network = agent_networks.policy_network
+        parametric_action_distribution = agent_networks.parametric_action_distribution
 
         @jax.jit
         def policy(observations: jnp.ndarray,
                 key_sample: jnp.ndarray) -> Tuple[jnp.ndarray, Mapping[str, Any]]:
             logits = policy_network.apply(params, observations)
             if deterministic:
-                return ppo_networks.parametric_action_distribution.mode(logits), {}
+                return agent_networks.parametric_action_distribution.mode(logits), {}
             raw_actions = parametric_action_distribution.sample_no_postprocessing(
                 logits, key_sample)
             log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
@@ -159,11 +157,11 @@ def make_inference_fn(ppo_networks: Union[PPONetworks, AtariPPONetworks]):
     return make_policy
 
 
-def make_feature_extraction_fn(ppo_networks: AtariPPONetworks):
+def make_feature_extraction_fn(agent_networks: AtariNetworks):
     """Creates feature extractor for inference."""
 
     def make_feature_extractor(params: Any):
-        shared_feature_extractor = ppo_networks.feature_extractor
+        shared_feature_extractor = agent_networks.feature_extractor
 
         @jax.jit
         def feature_extractor(observations: jnp.ndarray) -> jnp.ndarray:
@@ -174,7 +172,7 @@ def make_feature_extraction_fn(ppo_networks: AtariPPONetworks):
     return make_feature_extractor
 
 
-def make_ppo_networks(
+def make_networks(
         observation_size: int,
         action_size: int,
         policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
@@ -184,8 +182,8 @@ def make_ppo_networks(
         discrete_policy: bool = False,
         shared_feature_extractor: bool = False,
         feature_extractor_dense_hidden_layer_sizes: Optional[Sequence[int]] = (512,),
-    ) -> PPONetworks:
-    """Make PPO networks with preprocessor."""
+    ) -> Networks:
+    """Make A2C networks with preprocessor."""
     if discrete_policy:
         parametric_action_distribution = DiscreteDistribution(
             param_size=action_size)
@@ -210,7 +208,7 @@ def make_ppo_networks(
             feature_extractor_dense_hidden_layer_sizes[-1],
             hidden_layer_sizes=(),
             activation=activation)
-        return AtariPPONetworks(
+        return AtariNetworks(
             feature_extractor=feature_extractor,
             policy_network=policy_network,
             value_network=value_network,
@@ -225,7 +223,7 @@ def make_ppo_networks(
         hidden_layer_sizes=value_hidden_layer_sizes,
         activation=activation)
 
-    return PPONetworks(
+    return Networks(
         policy_network=policy_network,
         value_network=value_network,
         parametric_action_distribution=parametric_action_distribution)
@@ -291,26 +289,23 @@ def compute_gae(truncation: jnp.ndarray,
 
 
 
-def compute_ppo_loss(
-    params: Union[PPONetworkParams, AtariPPONetworkParams],
+def compute_a2c_loss(
+    params: Union[NetworkParams, AtariNetworkParams],
     data: Transition,
     rng: jnp.ndarray,
-    ppo_network: Union[PPONetworks, AtariPPONetworks],
+    network: Union[Networks, AtariNetworks],
     vf_cost: float = 0.5,
     entropy_cost: float = 1e-4,
     discounting: float = 0.9,
     reward_scaling: float = 1.0,
     gae_lambda: float = 0.95,
-    clipping_epsilon: float = 0.3,
     normalize_advantage: bool = True,
     shared_feature_extractor: bool = False,
 ) -> Tuple[jnp.ndarray, Mapping[str, jnp.ndarray]]:
-    """Computes PPO loss including value loss and entropy bonus.
+    """Computes A2C loss including value loss and entropy bonus.
 
-    Policy loss: $L_\pi = \frac{1}{\lvert \mathcal{D} \rvert} \sum_{\mathcal{D}} 
-    \min \biggl( \frac{\pi_\theta (a \mid s)}{\pi_\text{old} 
-    (a \mid s)} \hat{A}, \text{clip}\Bigl( \frac{\pi_\theta (a \mid s)}{\pi_\text{old} 
-    (a \mid s)}, 1-\varepsilon, 1+\varepsilon \Bigr) \hat{A} \biggr)$
+    Policy loss: $L_\pi = \frac{1}{\lvert \mathcal{D} \rvert} 
+    \sum_{\mathcal{D}} \hat{A} \log \pi_{\theta} (a \mid s)$
 
     Args:
         params: Network parameters,
@@ -318,22 +313,21 @@ def compute_ppo_loss(
             are ['state_extras']['truncation'] ['policy_extras']['raw_action']
             ['policy_extras']['log_prob']
         rng: Random key
-        ppo_network: PPO networks.
+        network: A2C networks.
         entropy_cost: entropy cost.
         discounting: discounting,
         reward_scaling: reward multiplier.
         gae_lambda: General advantage estimation lambda.
-        clipping_epsilon: Policy loss clipping epsilon
         normalize_advantage: whether to normalize advantage estimate
         shared_feature_extractor: Whether networks use a shared feature extractor.
 
     Returns:
         A tuple (loss, metrics)
     """
-    parametric_action_distribution = ppo_network.parametric_action_distribution
+    parametric_action_distribution = network.parametric_action_distribution
     
-    policy_apply = ppo_network.policy_network.apply
-    value_apply = ppo_network.value_network.apply
+    policy_apply = network.policy_network.apply
+    value_apply = network.value_network.apply
 
     # Put the time dimension first.
     data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
@@ -341,7 +335,7 @@ def compute_ppo_loss(
     hidden = data.observation
     hidden_boot = data.next_observation[-1]
     if shared_feature_extractor:
-        feature_extractor_apply = ppo_network.feature_extractor.apply
+        feature_extractor_apply = network.feature_extractor.apply
         hidden = feature_extractor_apply(params.feature_extractor, data.observation)
         hidden_boot = feature_extractor_apply(params.feature_extractor, 
                                           data.next_observation[-1])
@@ -357,7 +351,7 @@ def compute_ppo_loss(
 
     rewards = data.reward * reward_scaling
     truncation = data.extras['state_extras']['truncation']
-    termination = (1 - data.discount) * (1 - truncation) 
+    termination = (1 - data.discount) * (1 - truncation)
 
     target_action_log_probs = parametric_action_distribution.log_prob(
         policy_logits, data.extras['policy_extras']['raw_action'])
@@ -376,11 +370,7 @@ def compute_ppo_loss(
     log_ratio = target_action_log_probs - behaviour_action_log_probs
     rho_s = jnp.exp(log_ratio)
 
-    surrogate_loss1 = rho_s * advantages
-    surrogate_loss2 = jnp.clip(rho_s, 1 - clipping_epsilon,
-                                1 + clipping_epsilon) * advantages
-
-    policy_loss = -jnp.mean(jnp.minimum(surrogate_loss1, surrogate_loss2))
+    policy_loss = -jnp.mean(target_action_log_probs * advantages)
     approx_kl = ((rho_s - 1) - log_ratio).mean()
 
     # Value function loss
@@ -413,7 +403,7 @@ def main(_):
     if Config.write_logs_to_file:
         from absl import flags
         flags.FLAGS.alsologtostderr = True
-        log_path = f'./training_logs/ppo/{run_name}'
+        log_path = f'./.training_logs/a2c/{run_name}'
         if not os.path.exists(log_path):
             os.makedirs(log_path)
         logging.get_absl_handler().use_absl_log_file('logs', log_path)
@@ -481,7 +471,7 @@ def main(_):
     else:
         observation_shape = env_state.obs.shape[-1]
 
-    ppo_network = make_ppo_networks(
+    network = make_networks(
         observation_size=observation_shape, # NOTE only works with flattened observation space
         action_size=action_size, # flatten action size for nested spaces
         policy_hidden_layer_sizes=Config.policy_hidden_layer_sizes, 
@@ -492,9 +482,9 @@ def main(_):
         shared_feature_extractor=is_atari,
         feature_extractor_dense_hidden_layer_sizes=Config.atari_dense_layer_sizes,
     )
-    make_policy = make_inference_fn(ppo_network)
+    make_policy = make_inference_fn(network)
     if is_atari:
-        make_feature_extractor = make_feature_extraction_fn(ppo_network)
+        make_feature_extractor = make_feature_extraction_fn(network)
 
     # create optimizer
     if Config.anneal_lr:    
@@ -512,14 +502,13 @@ def main(_):
 
     # create loss function via functools.partial
     loss_fn = partial(
-        compute_ppo_loss,
-        ppo_network=ppo_network,
+        compute_a2c_loss,
+        network=network,
         vf_cost=Config.vf_cost,
         entropy_cost=Config.entropy_cost,
         discounting=Config.gamma,
         reward_scaling=Config.reward_scaling,
         gae_lambda=Config.gae_lambda,
-        clipping_epsilon=Config.clip_eps,
         normalize_advantage=Config.normalize_advantages,
         shared_feature_extractor=is_atari,
     )
@@ -595,14 +584,14 @@ def main(_):
 
         shuffled_data = jax.tree_util.tree_map(convert_data, data)
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            minibatch_step, 
+            minibatch_step, # partial(minibatch_step, normalizer_params=normalizer_params),
             (optimizer_state, params, key_grad),
             shuffled_data,
             length=Config.num_minibatches)
         return (optimizer_state, params, key), metrics
     
 
-    # learning 
+    # learning
     def learn(
         data: Transition,
         training_state: TrainingState,
@@ -624,17 +613,16 @@ def main(_):
     
     learn = jax.pmap(learn, axis_name=_PMAP_AXIS_NAME)
 
-
     # initialize params & training state
     if is_atari:
-        init_params = AtariPPONetworkParams(
-            feature_extractor=ppo_network.feature_extractor.init(key_feature_extractor),
-            policy=ppo_network.policy_network.init(key_policy),
-            value=ppo_network.value_network.init(key_value))
+        init_params = AtariNetworkParams(
+            feature_extractor=network.feature_extractor.init(key_feature_extractor),
+            policy=network.policy_network.init(key_policy),
+            value=network.value_network.init(key_value))
     else:
-        init_params = PPONetworkParams(
-            policy=ppo_network.policy_network.init(key_policy),
-            value=ppo_network.value_network.init(key_value))
+        init_params = NetworkParams(
+            policy=network.policy_network.init(key_policy),
+            value=network.value_network.init(key_value))
     training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
         optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
         params=init_params,
@@ -655,7 +643,6 @@ def main(_):
             clip_obs=Config.clip_observations,
             clip_rewards=Config.clip_rewards,
             evaluate=True,
-            capture_video=Config.capture_video,
         )
         eval_env.seed(int(eval_key[0]))
         eval_state = eval_env.reset()
@@ -678,7 +665,7 @@ def main(_):
         if is_atari:
             feature_extractor = make_feature_extractor(_unpmap(training_state.params.feature_extractor))
         policy = make_policy(_unpmap(training_state.params.policy))
-
+        
         data = []
         for step in range(Config.batch_size * Config.num_minibatches // Config.num_envs):
             transitions = []
@@ -690,7 +677,8 @@ def main(_):
                 actions, policy_extras = policy(obs, current_key)
                 actions = np.asarray(actions)
                 nstate = envs.step(actions) 
-                # NOTE: info transformed: Array[Dict] --> Dict[Array]
+
+                # NOTE: info is transformed as expected: Array[Dict] --> Dict[Array]
                 state_extras = {'truncation': jnp.array([info['truncation'] for info in nstate.info])} 
                 transition = Transition(  
                     observation=env_state.obs,
@@ -719,7 +707,6 @@ def main(_):
         data = jax.tree_util.tree_map(lambda x: jnp.reshape(x, (local_devices_to_use, -1,) + x.shape[1:]),
                                     data)
         
-        # as function 
         keys_sgd = jax.random.split(key_sgd, local_devices_to_use)
         new_training_state, metrics = learn(data=data, training_state=training_state, key_sgd=keys_sgd)
     
@@ -728,7 +715,7 @@ def main(_):
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
         jax.tree_util.tree_map(lambda x: x.block_until_ready(), metrics)
         epoch_update_time = time.time() - update_time_start
-        training_walltime = time.time() - start_time # += epoch_update_time + epoch_rollout_time
+        training_walltime = time.time() - start_time 
         sps = env_step_per_training_step / (epoch_update_time + epoch_rollout_time)
         global_step += env_step_per_training_step
         
@@ -844,6 +831,8 @@ def main(_):
         print(f"model saved to {model_path}")
 
     envs.close()
+
+    return scores, training_walltime, metrics, eval_metrics
 
 
 if __name__ == "__main__":

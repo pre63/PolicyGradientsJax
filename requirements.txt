@@ -78,7 +78,6 @@ tensorboard-data-server==0.7.1
 tensorflow==2.14.0
 tensorflow-estimator==2.14.0
 tensorflow-io-gcs-filesystem==0.34.0
-tensorflow-macos==2.14.0
 tensorflow-probability==0.22.0
 tensorstore==0.1.45
 termcolor==2.3.0
@@ -89,3 +88,7 @@ typing_extensions==4.5.0
 urllib3==2.0.6
 Werkzeug==3.0.0
 wrapt==1.14.1
+setuptools
+# Platform-specific dependencies
+tensorflow==2.14.0; platform_system == "Linux"
+tensorflow-macos==2.14.0; platform_system == "Darwin"

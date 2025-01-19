@@ -1,8 +1,6 @@
-
-"""Trust Region Policy Optimization (TRPO)."""
+"""Proximal Policy Optimization (PPO)."""
 
 from absl import logging, app
-from copy import deepcopy
 from functools import partial
 import os
 import pickle
@@ -21,24 +19,24 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from envs import make_env, Transition, has_discrete_action_space, is_atari_env
-from networks.policy import Policy
-from networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
-from networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
+from .envs import make_env, Transition, has_discrete_action_space, is_atari_env
+from .networks.policy import Policy
+from .networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
+from .networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
 
 class Config:
     # experiment
-    experiment_name = 'trpo_main_det_3'
-    seed = 30
+    experiment_name = 'ppo_test_video'
+    seed = 20
     platform = 'cpu' # CPU or GPU
-    capture_video = False # Not implemented
+    capture_video = True # Not implemented
     write_logs_to_file = False
     save_model = False
 
     # environment
-    env_id = 'HalfCheetah-v4' 
+    env_id = 'Humanoid-v4' 
     num_envs = 8
-    parallel_envs = False 
+    parallel_envs = True 
     clip_actions = False
     normalize_observations = True 
     normalize_rewards = True
@@ -46,27 +44,25 @@ class Config:
     clip_rewards = 10.
     eval_env = True
     num_eval_episodes = 10
-    eval_every = 2
+    eval_every = 5
     deterministic_eval = True
 
     # algorithm hyperparameters
-    total_timesteps = int(1e6) * 8
+    total_timesteps = int(1e6) * 8 
     learning_rate = 3e-4 
     unroll_length = 2048 
     anneal_lr = True
     gamma = 0.99 
     gae_lambda = 0.95
-    batch_size = 1 
+    batch_size = 1 # number of unrolls per minibatch 
     num_minibatches = 8
     update_epochs = 10 
     normalize_advantages = True
-    target_kl = 0.01 
-    cg_damping: float = 0.1
-    cg_max_iterations: int = 10
-    line_search_max_iter: int = 10 
-    line_search_shrinking_factor: float = 0.8
-    vf_cost = 1.
+    clip_eps = 0.2
+    entropy_cost = 0.00 
+    vf_cost = 0.5
     max_grad_norm = 0.5
+    target_kl = None
     reward_scaling = 1. 
     
     # policy params
@@ -97,21 +93,21 @@ def _strip_weak_type(tree):
 
 
 @flax.struct.dataclass
-class NetworkParams:
+class PPONetworkParams:
     """Contains training state for the learner."""
     policy: Any
     value: Any
 
 
 @flax.struct.dataclass
-class Networks:
+class PPONetworks:
     policy_network: FeedForwardNetwork
     value_network: FeedForwardNetwork
     parametric_action_distribution: Union[ParametricDistribution, DiscreteDistribution]
 
 
 @flax.struct.dataclass
-class AtariNetworkParams:
+class AtariPPONetworkParams:
     """Contains training state for the learner."""
     feature_extractor: Any
     policy: Any
@@ -119,7 +115,7 @@ class AtariNetworkParams:
 
 
 @flax.struct.dataclass
-class AtariNetworks:
+class AtariPPONetworks:
     feature_extractor: FeedForwardNetwork
     policy_network: FeedForwardNetwork
     value_network: FeedForwardNetwork
@@ -130,24 +126,24 @@ class AtariNetworks:
 class TrainingState:
     """Contains training state for the learner."""
     optimizer_state: optax.OptState
-    params: Union[NetworkParams, AtariNetworkParams]
+    params: Union[PPONetworkParams, AtariPPONetworkParams]
     env_steps: jnp.ndarray
 
 
-def make_inference_fn(agent_networks: Union[Networks, AtariNetworks]):
-    """Creates params and inference function for the agent."""
+def make_inference_fn(ppo_networks: Union[PPONetworks, AtariPPONetworks]):
+    """Creates params and inference function for the PPO agent."""
 
     def make_policy(params: Any,
                     deterministic: bool = False) -> Policy:
-        policy_network = agent_networks.policy_network
-        parametric_action_distribution = agent_networks.parametric_action_distribution
+        policy_network = ppo_networks.policy_network
+        parametric_action_distribution = ppo_networks.parametric_action_distribution
 
         @jax.jit
         def policy(observations: jnp.ndarray,
                 key_sample: jnp.ndarray) -> Tuple[jnp.ndarray, Mapping[str, Any]]:
             logits = policy_network.apply(params, observations)
             if deterministic:
-                return agent_networks.parametric_action_distribution.mode(logits), {}
+                return ppo_networks.parametric_action_distribution.mode(logits), {}
             raw_actions = parametric_action_distribution.sample_no_postprocessing(
                 logits, key_sample)
             log_prob = parametric_action_distribution.log_prob(logits, raw_actions)
@@ -163,11 +159,11 @@ def make_inference_fn(agent_networks: Union[Networks, AtariNetworks]):
     return make_policy
 
 
-def make_feature_extraction_fn(agent_networks: AtariNetworks):
+def make_feature_extraction_fn(ppo_networks: AtariPPONetworks):
     """Creates feature extractor for inference."""
 
     def make_feature_extractor(params: Any):
-        shared_feature_extractor = agent_networks.feature_extractor
+        shared_feature_extractor = ppo_networks.feature_extractor
 
         @jax.jit
         def feature_extractor(observations: jnp.ndarray) -> jnp.ndarray:
@@ -178,7 +174,7 @@ def make_feature_extraction_fn(agent_networks: AtariNetworks):
     return make_feature_extractor
 
 
-def make_networks(
+def make_ppo_networks(
         observation_size: int,
         action_size: int,
         policy_hidden_layer_sizes: Sequence[int] = (32,) * 4,
@@ -188,8 +184,8 @@ def make_networks(
         discrete_policy: bool = False,
         shared_feature_extractor: bool = False,
         feature_extractor_dense_hidden_layer_sizes: Optional[Sequence[int]] = (512,),
-    ) -> Networks:
-    """Make TRPO networks with preprocessor."""
+    ) -> PPONetworks:
+    """Make PPO networks with preprocessor."""
     if discrete_policy:
         parametric_action_distribution = DiscreteDistribution(
             param_size=action_size)
@@ -214,7 +210,7 @@ def make_networks(
             feature_extractor_dense_hidden_layer_sizes[-1],
             hidden_layer_sizes=(),
             activation=activation)
-        return AtariNetworks(
+        return AtariPPONetworks(
             feature_extractor=feature_extractor,
             policy_network=policy_network,
             value_network=value_network,
@@ -229,7 +225,7 @@ def make_networks(
         hidden_layer_sizes=value_hidden_layer_sizes,
         activation=activation)
 
-    return Networks(
+    return PPONetworks(
         policy_network=policy_network,
         value_network=value_network,
         parametric_action_distribution=parametric_action_distribution)
@@ -294,202 +290,50 @@ def compute_gae(truncation: jnp.ndarray,
     return jax.lax.stop_gradient(vs), jax.lax.stop_gradient(advantages)
 
 
-def compute_policy_objective(
-    params: Union[NetworkParams, AtariNetworkParams],
+
+def compute_ppo_loss(
+    params: Union[PPONetworkParams, AtariPPONetworkParams],
     data: Transition,
-    hidden: jnp.ndarray,
-    advantages: jnp.ndarray,
-    network: Union[Networks, AtariNetworks],
-    shared_feature_extractor: bool = False,
-) -> Tuple[jnp.ndarray, jnp.ndarray]:
-    """Compute the TRPO policy objective and kl divergence to previous policy.
-
-    Policy loss: $L_\pi = \frac{1}{\lvert \mathcal{D} \rvert} \sum_{\mathcal{D}} 
-    \hat{A} \frac{\pi_\theta (a \mid s)}{\pi_\text{old} (a \mid s)}$
-
-    Args:
-        params: Network parameters,
-        data: Transition that with leading dimension [B, T]. extra fields required
-            are ['state_extras']['truncation'] ['policy_extras']['raw_action']
-            ['policy_extras']['log_prob']
-        hidden: Observations or embeddings if using a shared feature extractor.
-        advantages: Computed advantages for the data.
-        network: TRPO networks.
-        shared_feature_extractor: Whether networks use a shared feature extractor.
-
-    Returns:
-        A tuple (policy objective, kl divergence)
-    """
-    parametric_action_distribution = network.parametric_action_distribution
-    
-    policy_apply = network.policy_network.apply
-
-    if shared_feature_extractor:
-        feature_extractor_apply = network.feature_extractor.apply
-        hidden = feature_extractor_apply(params.feature_extractor, hidden)
-
-    policy_logits = policy_apply(params.policy, hidden)
-
-    target_action_log_probs = parametric_action_distribution.log_prob(
-        policy_logits, data.extras['policy_extras']['raw_action'])
-    behaviour_action_log_probs = data.extras['policy_extras']['log_prob']
-
-    log_ratio = target_action_log_probs - behaviour_action_log_probs
-    rho_s = jnp.exp(log_ratio)
-
-    policy_objective = jnp.mean(rho_s * advantages) 
-    # NOTE: KL(old_policy || new_policy) yields better results than vice versa
-    # kl_div = jnp.mean(parametric_action_distribution.kl_divergence(policy_logits, jax.lax.stop_gradient(policy_logits)))
-    kl_div = jnp.mean(parametric_action_distribution.kl_divergence(jax.lax.stop_gradient(policy_logits), policy_logits))
-    return policy_objective, kl_div
-
-
-def compute_policy_objective_and_kl(
-    params: Union[NetworkParams, AtariNetworkParams],
-    data: Transition,
-    hidden: jnp.ndarray,
-    advantages: jnp.ndarray,
-    network: Union[Networks, AtariNetworks],
-    policy_objective_grad_fn: Callable[..., Tuple]
-) -> Tuple[jnp.ndarray, Tuple[jnp.ndarray, jnp.ndarray]]:
-    """helper function to enable computing kl gradients.
-
-    Args:
-        params: Network parameters,
-        data: Transition that with leading dimension [B, T]. extra fields required
-            are ['state_extras']['truncation'] ['policy_extras']['raw_action']
-            ['policy_extras']['log_prob']
-        hidden: Observations or embeddings if using a shared feature extractor.
-        advantages: Computed advantages for the data.
-        network: TRPO networks.
-        policy_objective_grad_fn: Function computing the value and gradients of 
-            compute_policy_objective.
-
-    Returns:
-        A tuple (kl divergence, (policy objective, policy gradient))
-    """
-    (policy_objective, kl_div), policy_objective_grad = policy_objective_grad_fn(
-        params, data, hidden, advantages, network
-    )
-    return kl_div, (policy_objective, policy_objective_grad)
-
-
-def jacobian_vector_product(
-    params: Union[NetworkParams, AtariNetworkParams],
-    vector: jnp.ndarray,
-    data: Transition,
-    hidden: jnp.ndarray,
-    advantages: jnp.ndarray,
-    network: Union[Networks, AtariNetworks],
-    policy_objective_and_kl_grad_fn: Callable,
-) -> jnp.ndarray:
-    """
-    Computes the Jacobian-vector dot product.
-
-    Args:
-        params: Network parameters.
-        vector: Vector to compute the dot product with.
-        data: Transition that with leading dimension [B, T]. extra fields required
-            are ['state_extras']['truncation'] ['policy_extras']['raw_action']
-            ['policy_extras']['log_prob']
-        hidden: Observations or embeddings if using a shared feature extractor.
-        advantages: Computed advantages for the data.
-        network: TRPO networks.
-        policy_objective_and_kl_grad_fn: Function computing the value and gradients of 
-            compute_policy_objective_and_kl.
-
-    Returns: 
-        Jacobian-vector dot product
-    """
-    # TODO option for subsampling data (and advantages here) (paper: only 10% of data)
-
-    # vector is the policy_objective_gradients
-    (_, (_, _)), grad_kl = policy_objective_and_kl_grad_fn(
-        params, data, hidden, advantages, network
-    )
-
-    product_tree = jax.tree_util.tree_map(lambda x, y: jnp.sum(x * y), grad_kl, jax.lax.stop_gradient(vector))
-    jacobian_vector_product = sum(jax.tree_util.tree_leaves(product_tree))
-    return jacobian_vector_product
-
-
-def hessian_vector_product(
-    vector: jnp.ndarray,
-    params: Union[NetworkParams, AtariNetworkParams],
-    data: Transition,
-    hidden: jnp.ndarray,
-    advantages: jnp.ndarray,
-    network: Union[Networks, AtariNetworks],
-    hessian_fn: Callable,
-    cg_damping: float = 0.1, 
-) -> jnp.ndarray:
-    """
-    Computes the matrix-vector product with the Fisher information matrix.
-
-    Args:
-        vector: Vector to compute the dot product with.
-        params: Network parameters,
-        data: Transition that with leading dimension [B, T]. extra fields required
-            are ['state_extras']['truncation'] ['policy_extras']['raw_action']
-            ['policy_extras']['log_prob']
-        hidden: Observations or embeddings if using a shared feature extractor.
-        advantages: Computed advantages for the data.
-        network: TRPO networks.
-        hessian_fn: function computing the gradient of jacobian_vector_product.
-        cg_damping: Damping in the Hessian vector product computation.
-    :return: Hessian-vector dot product (with damping)
-    """
-    # NOTE: not the actual Hessian
-    hessian = hessian_fn(params, vector, data, hidden, advantages, network)
-    return jax.tree_util.tree_map(lambda x,y: x + cg_damping * y, hessian, vector) 
-
-
-def trpo_policy_update(
-    params: Union[NetworkParams, AtariNetworkParams],
-    data: Transition,
-    network: Union[Networks, AtariNetworks],
-    policy_objective_and_kl_grad_fn,
-    hessian_vector_product: Callable,
-    target_kl: float = 0.01,
-    line_search_max_iter: int = 10,
-    line_search_shrinking_factor: float = 0.8,
-    cg_max_iterations: int = 10,
+    rng: jnp.ndarray,
+    ppo_network: Union[PPONetworks, AtariPPONetworks],
+    vf_cost: float = 0.5,
+    entropy_cost: float = 1e-4,
     discounting: float = 0.9,
     reward_scaling: float = 1.0,
     gae_lambda: float = 0.95,
+    clipping_epsilon: float = 0.3,
     normalize_advantage: bool = True,
     shared_feature_extractor: bool = False,
-    pmap_axis_name: Optional[str] = None,
-) -> Tuple[Union[NetworkParams, AtariNetworkParams], Mapping[str, jnp.ndarray]]:
-    """Updates the policy paramters.
+) -> Tuple[jnp.ndarray, Mapping[str, jnp.ndarray]]:
+    """Computes PPO loss including value loss and entropy bonus.
+
+    Policy loss: $L_\pi = \frac{1}{\lvert \mathcal{D} \rvert} \sum_{\mathcal{D}} 
+    \min \biggl( \frac{\pi_\theta (a \mid s)}{\pi_\text{old} 
+    (a \mid s)} \hat{A}, \text{clip}\Bigl( \frac{\pi_\theta (a \mid s)}{\pi_\text{old} 
+    (a \mid s)}, 1-\varepsilon, 1+\varepsilon \Bigr) \hat{A} \biggr)$
 
     Args:
         params: Network parameters,
         data: Transition that with leading dimension [B, T]. extra fields required
             are ['state_extras']['truncation'] ['policy_extras']['raw_action']
             ['policy_extras']['log_prob']
-        network: TRPO networks.
-        policy_objective_and_kl_grad_fn: function computing values and gradients 
-            of the policy objective and KL constraint.
-        hessian_vector_product: function computing the product of a vector with the hessian
-            of the KL constraints.
-        target_kl: KL divergence constraint.
-        line_search_max_iter: Maximum number of line search iterations.
-        line_search_shrinking_factor: Factor by which step size is decreased each iteration.
-        cg_max_iterations: Maximum number of iterations in the cg algorithm.
+        rng: Random key
+        ppo_network: PPO networks.
+        entropy_cost: entropy cost.
         discounting: discounting,
         reward_scaling: reward multiplier.
         gae_lambda: General advantage estimation lambda.
+        clipping_epsilon: Policy loss clipping epsilon
         normalize_advantage: whether to normalize advantage estimate
         shared_feature_extractor: Whether networks use a shared feature extractor.
 
     Returns:
         A tuple (loss, metrics)
     """
-    parametric_action_distribution = network.parametric_action_distribution
+    parametric_action_distribution = ppo_network.parametric_action_distribution
     
-    policy_apply = network.policy_network.apply
-    value_apply = network.value_network.apply
+    policy_apply = ppo_network.policy_network.apply
+    value_apply = ppo_network.value_network.apply
 
     # Put the time dimension first.
     data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
@@ -497,21 +341,29 @@ def trpo_policy_update(
     hidden = data.observation
     hidden_boot = data.next_observation[-1]
     if shared_feature_extractor:
-        feature_extractor_apply = network.feature_extractor.apply
+        feature_extractor_apply = ppo_network.feature_extractor.apply
+        hidden = feature_extractor_apply(params.feature_extractor, data.observation)
         hidden_boot = feature_extractor_apply(params.feature_extractor, 
                                           data.next_observation[-1])
     
-    policy_logits = policy_apply(params.policy, hidden)
+    policy_logits = policy_apply(params.policy,
+                                hidden)
+
     baseline = value_apply(params.value, hidden)
-    bootstrap_value = value_apply(params.value, hidden_boot)
+
+    
+    bootstrap_value = value_apply(params.value,
+                                    hidden_boot)
 
     rewards = data.reward * reward_scaling
     truncation = data.extras['state_extras']['truncation']
     termination = (1 - data.discount) * (1 - truncation) 
 
+    target_action_log_probs = parametric_action_distribution.log_prob(
+        policy_logits, data.extras['policy_extras']['raw_action'])
     behaviour_action_log_probs = data.extras['policy_extras']['log_prob']
 
-    _, advantages = compute_gae(
+    vs, advantages = compute_gae(
         truncation=truncation,
         termination=termination,
         rewards=rewards,
@@ -521,164 +373,36 @@ def trpo_policy_update(
         discount=discounting)
     if normalize_advantage:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    log_ratio = target_action_log_probs - behaviour_action_log_probs
+    rho_s = jnp.exp(log_ratio)
 
-    # compute gradient of kl_div and policy_objective wrt the policy params
-    (kl_div, (policy_objective, policy_objective_grad)), grad_kl = policy_objective_and_kl_grad_fn(
-        params, data, hidden, advantages, network
-    )
+    surrogate_loss1 = rho_s * advantages
+    surrogate_loss2 = jnp.clip(rho_s, 1 - clipping_epsilon,
+                                1 + clipping_epsilon) * advantages
 
-    # due to pmapping
-    policy_objective_grad = jax.lax.pmean(policy_objective_grad, axis_name=pmap_axis_name)
-    grad_kl = jax.lax.pmean(grad_kl, axis_name=pmap_axis_name)
+    policy_loss = -jnp.mean(jnp.minimum(surrogate_loss1, surrogate_loss2))
+    approx_kl = ((rho_s - 1) - log_ratio).mean()
 
-    # linesearch
-    # Hessian-vector dot product function used in the conjugate gradient step
-    hessian_vector_product_fn = partial(hessian_vector_product,
-                                        params=params,
-                                        data=data,
-                                        hidden=hidden,
-                                        advantages=advantages,
-                                        network=network,)
-
-    # Computing search direction
-    search_direction, _ = jax.scipy.sparse.linalg.cg(
-        hessian_vector_product_fn, 
-        policy_objective_grad, 
-        tol=1e-10, 
-        maxiter=cg_max_iterations,
-    )
-
-    # Maximal step length
-    line_search_max_step_size = 2 * target_kl
-    denom_tree = jax.tree_util.tree_map(lambda x, y: jnp.sum(x * y), 
-                                   search_direction, 
-                                   hessian_vector_product_fn(search_direction))
-    line_search_max_step_size /= sum(jax.tree_util.tree_leaves(denom_tree))
-    line_search_max_step_size = jnp.sqrt(line_search_max_step_size) 
-    line_search_backtrack_coeff = 1.0
-
-    # Line-search (backtracking)
-    def line_search_step(carry):
-        (iteration, new_policy_objective, kl_div, line_search_backtrack_coeff, unused_params) = carry
-
-        iteration += 1
-        
-        # Applying the scaled step direction
-        new_params = jax.tree_util.tree_map(lambda x, y: x + line_search_backtrack_coeff * line_search_max_step_size * y,
-                                            params, 
-                                            search_direction)
-
-        # Recomputing the policy log-probabilities
-        hidden = data.observation
-        if shared_feature_extractor:
-            hidden = feature_extractor_apply(new_params.feature_extractor, hidden)
-        logits = policy_apply(new_params.policy,
-                                        hidden)
-        target_action_log_probs = parametric_action_distribution.log_prob(
-                logits, data.extras['policy_extras']['raw_action'])
-
-        # New policy objective
-        log_ratio = target_action_log_probs - behaviour_action_log_probs
-        rho_s = jnp.exp(log_ratio)
-        new_policy_objective = (advantages * rho_s).mean()
-
-        # New KL-divergence
-        # NOTE: KL(old_policy || new_policy) yields better results than vice versa
-        # kl_div = jnp.mean(parametric_action_distribution.kl_divergence(logits, policy_logits))
-        kl_div = jnp.mean(parametric_action_distribution.kl_divergence(policy_logits, logits))
-
-        # Reducing step size if line-search wasn't successful
-        line_search_backtrack_coeff *= line_search_shrinking_factor
-        return (iteration, new_policy_objective, kl_div, line_search_backtrack_coeff, new_params)
-
-    (iterations, new_policy_objective, kl_div, line_search_backtrack_coeff, new_params) = jax.lax.while_loop(
-            lambda x: jnp.logical_and(jnp.logical_or(x[2] > target_kl, x[1] < policy_objective),
-                                        x[0] < line_search_max_iter), 
-            line_search_step, 
-            (0, policy_objective, 100., line_search_backtrack_coeff, params), 
-        )
-    
-    is_line_search_success = jnp.logical_and(kl_div <= target_kl, new_policy_objective >= policy_objective)
-    policy_params = jax.lax.cond(is_line_search_success, lambda: new_params, lambda: params)
-    policy_params = new_params
-
-    metrics = {
-        'policy_objective': policy_objective,
-        'new_policy_objective': new_policy_objective,
-        'kl_div': jax.lax.stop_gradient(kl_div),
-        'line_search_success': jnp.array(is_line_search_success, int),
-        'iterations': jnp.array(iterations, int),
-    }
-
-    return policy_params, metrics
-
-
-def compute_value_loss(
-    params: Union[NetworkParams, AtariNetworkParams],
-    data: Transition,
-    network: Union[Networks, AtariNetworks],
-    vf_cost: float = 1.,
-    discounting: float = 0.9,
-    reward_scaling: float = 1.0,
-    gae_lambda: float = 0.95,
-    shared_feature_extractor: bool = False,
-) -> Tuple[jnp.ndarray, Mapping[str, jnp.ndarray]]:
-    """Computes value loss.
-
-    Args:
-        params: Network parameters,
-        data: Transition that with leading dimension [B, T]. extra fields required
-            are ['state_extras']['truncation'] ['policy_extras']['raw_action']
-            ['policy_extras']['log_prob']
-        network: TRPO networks.
-        vf_cost: Scaling coefficient for value loss.
-        discounting: discounting,
-        reward_scaling: reward multiplier.
-        gae_lambda: General advantage estimation lambda.
-        shared_feature_extractor: Whether networks use a shared feature extractor.
-
-    Returns:
-        A tuple (loss, metrics)
-    """
-    value_apply = network.value_network.apply
-
-    # Put the time dimension first.
-    data = jax.tree_util.tree_map(lambda x: jnp.swapaxes(x, 0, 1), data)
-
-    hidden = data.observation
-    hidden_boot = data.next_observation[-1]
-    if shared_feature_extractor:
-        feature_extractor_apply = network.feature_extractor.apply
-        hidden = feature_extractor_apply(params.feature_extractor, data.observation)
-        hidden_boot = feature_extractor_apply(params.feature_extractor, 
-                                          data.next_observation[-1])
-
-    baseline = value_apply(params.value, hidden)
-    bootstrap_value = value_apply(params.value,
-                                    hidden_boot)
-
-    rewards = data.reward * reward_scaling
-    truncation = data.extras['state_extras']['truncation']
-    termination = (1 - data.discount) * (1 - truncation) 
-
-    vs, _ = compute_gae(
-        truncation=truncation,
-        termination=termination,
-        rewards=rewards,
-        values=baseline,
-        bootstrap_value=bootstrap_value,
-        lambda_=gae_lambda,
-        discount=discounting)
-    
     # Value function loss
     v_error = vs - baseline
     v_loss = jnp.mean(v_error * v_error) * 0.5 * vf_cost
 
+    # Entropy reward
+    entropy = jnp.mean(parametric_action_distribution.entropy(policy_logits, rng))
+    entropy_loss = entropy_cost * -entropy
+
+    total_loss = policy_loss + v_loss + entropy_loss
+
     metrics = {
+        'total_loss': total_loss,
+        'policy_loss': policy_loss,
         'value_loss': v_loss,
+        'entropy_loss': entropy_loss,
+        'entropy': entropy, 
+        'approx_kl': jax.lax.stop_gradient(approx_kl), 
     }
 
-    return v_loss, metrics
+    return total_loss, metrics
 
 
 
@@ -689,7 +413,7 @@ def main(_):
     if Config.write_logs_to_file:
         from absl import flags
         flags.FLAGS.alsologtostderr = True
-        log_path = f'./training_logs/trpo/{run_name}'
+        log_path = f'./.training_logs/ppo/{run_name}'
         if not os.path.exists(log_path):
             os.makedirs(log_path)
         logging.get_absl_handler().use_absl_log_file('logs', log_path)
@@ -757,7 +481,7 @@ def main(_):
     else:
         observation_shape = env_state.obs.shape[-1]
 
-    network = make_networks(
+    ppo_network = make_ppo_networks(
         observation_size=observation_shape, # NOTE only works with flattened observation space
         action_size=action_size, # flatten action size for nested spaces
         policy_hidden_layer_sizes=Config.policy_hidden_layer_sizes, 
@@ -768,9 +492,9 @@ def main(_):
         shared_feature_extractor=is_atari,
         feature_extractor_dense_hidden_layer_sizes=Config.atari_dense_layer_sizes,
     )
-    make_policy = make_inference_fn(network)
+    make_policy = make_inference_fn(ppo_network)
     if is_atari:
-        make_feature_extractor = make_feature_extraction_fn(network)
+        make_feature_extractor = make_feature_extraction_fn(ppo_network)
 
     # create optimizer
     if Config.anneal_lr:    
@@ -786,44 +510,17 @@ def main(_):
         optax.adam(learning_rate),
     )
 
-    compute_policy_objective_fn = partial(compute_policy_objective, shared_feature_extractor=is_atari)
-    policy_objective_grad_fn = jax.value_and_grad(compute_policy_objective_fn, has_aux=True)
-
-    compute_policy_objective_and_kl_fn = partial(compute_policy_objective_and_kl, policy_objective_grad_fn=policy_objective_grad_fn)
-    policy_objective_and_kl_grad_fn = jax.value_and_grad(compute_policy_objective_and_kl_fn, has_aux=True)
-
-    jacobian_vector_product_fn = partial(jacobian_vector_product, policy_objective_and_kl_grad_fn=policy_objective_and_kl_grad_fn)
-
-    hessian_fn = jax.grad(jacobian_vector_product_fn)
-    hessian_vector_product_fn = partial(hessian_vector_product, hessian_fn=hessian_fn, cg_damping=Config.cg_damping)
-
-
     # create loss function via functools.partial
-    policy_loss_fn = partial(
-        trpo_policy_update,
-        network=network,
-        policy_objective_and_kl_grad_fn=policy_objective_and_kl_grad_fn,
-        hessian_vector_product=hessian_vector_product_fn,
-        target_kl=Config.target_kl,
-        line_search_max_iter=Config.line_search_max_iter,
-        line_search_shrinking_factor=Config.line_search_shrinking_factor,
-        cg_max_iterations=Config.cg_max_iterations,
-        discounting=Config.gamma,
-        reward_scaling=Config.reward_scaling,
-        gae_lambda=Config.gae_lambda,
-        normalize_advantage=Config.normalize_advantages,
-        shared_feature_extractor=is_atari,
-        pmap_axis_name=_PMAP_AXIS_NAME,
-    )
-
-    # create loss function via functools.partial
-    v_loss_fn = partial(
-        compute_value_loss,
-        network=network,
+    loss_fn = partial(
+        compute_ppo_loss,
+        ppo_network=ppo_network,
         vf_cost=Config.vf_cost,
+        entropy_cost=Config.entropy_cost,
         discounting=Config.gamma,
         reward_scaling=Config.reward_scaling,
         gae_lambda=Config.gae_lambda,
+        clipping_epsilon=Config.clip_eps,
+        normalize_advantage=Config.normalize_advantages,
         shared_feature_extractor=is_atari,
     )
 
@@ -838,7 +535,6 @@ def main(_):
             return value, jax.lax.pmean(grad, axis_name=pmap_axis_name)
 
         return g if pmap_axis_name is None else h
-    
     
 
     def gradient_update_fn(loss_fn: Callable[..., float],
@@ -871,24 +567,24 @@ def main(_):
         return f
     
     gradient_update_fn = gradient_update_fn(
-        v_loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True
-    )
+        loss_fn, optimizer, pmap_axis_name=_PMAP_AXIS_NAME, has_aux=True
+        )
 
-    # minibatch training step for critic
-    def v_minibatch_step(carry, data: Transition,):
+    # minibatch training step
+    def minibatch_step(carry, data: Transition,):
         optimizer_state, params, key = carry
         key, key_loss = jax.random.split(key)
         (_, metrics), params, optimizer_state = gradient_update_fn(
             params,
             data,
-            # key_loss,
+            key_loss,
             optimizer_state=optimizer_state)
 
         return (optimizer_state, params, key), metrics
 
 
-    # sgd step for critic
-    def v_sgd_step(carry, unused_t, data: Transition):
+    # sgd step
+    def sgd_step(carry, unused_t, data: Transition):
         optimizer_state, params, key = carry
         key, key_perm, key_grad = jax.random.split(key, 3)
 
@@ -899,39 +595,11 @@ def main(_):
 
         shuffled_data = jax.tree_util.tree_map(convert_data, data)
         (optimizer_state, params, _), metrics = jax.lax.scan(
-            v_minibatch_step, # partial(minibatch_step, normalizer_params=normalizer_params),
+            minibatch_step, 
             (optimizer_state, params, key_grad),
             shuffled_data,
             length=Config.num_minibatches)
         return (optimizer_state, params, key), metrics
-    
-
-    # minibatch training step for actor
-    def policy_minibatch_step(carry, data: Transition,):
-        params, key = carry
-        key, key_loss = jax.random.split(key)
-        params, metrics = policy_loss_fn(params, data)
-
-        return (params, key), metrics
-    
-
-    # sgd step for actor
-    def policy_sgd_step(carry, unused_t, data: Transition):
-        params, key = carry
-        key, key_perm, key_grad = jax.random.split(key, 3)
-
-        def convert_data(x: jnp.ndarray):
-            x = jax.random.permutation(key_perm, x)
-            x = jnp.reshape(x, (Config.num_minibatches, -1) + x.shape[1:])
-            return x
-
-        shuffled_data = jax.tree_util.tree_map(convert_data, data)
-        (params, _), metrics = jax.lax.scan(
-            policy_minibatch_step, 
-            (params, key_grad),
-            shuffled_data,
-            length=Config.num_minibatches)
-        return (params, key), metrics
     
 
     # learning 
@@ -940,16 +608,10 @@ def main(_):
         training_state: TrainingState,
         key_sgd: jnp.ndarray,
     ):
-        value_params = deepcopy(training_state.params.value)
-        key_policy, key_sgd = jax.random.split(key_sgd)
-        (policy_params, _), policy_metrics = policy_sgd_step((training_state.params, key_policy), (), data=data)
-        policy_params = policy_params.replace(value=value_params) 
-
-
         (optimizer_state, params, _), metrics = jax.lax.scan(
             partial(
-                v_sgd_step, data=data),
-            (training_state.optimizer_state, policy_params, key_sgd), (), 
+                sgd_step, data=data),
+            (training_state.optimizer_state, training_state.params, key_sgd), (),
             length=Config.update_epochs)
 
         new_training_state = TrainingState(
@@ -957,7 +619,6 @@ def main(_):
             params=params,
             env_steps=training_state.env_steps + env_step_per_training_step)
         
-        metrics = policy_metrics | metrics 
         metrics = jax.tree_util.tree_map(jnp.mean, metrics)
         return new_training_state, metrics
     
@@ -966,14 +627,14 @@ def main(_):
 
     # initialize params & training state
     if is_atari:
-        init_params = AtariNetworkParams(
-            feature_extractor=network.feature_extractor.init(key_feature_extractor),
-            policy=network.policy_network.init(key_policy),
-            value=network.value_network.init(key_value))
+        init_params = AtariPPONetworkParams(
+            feature_extractor=ppo_network.feature_extractor.init(key_feature_extractor),
+            policy=ppo_network.policy_network.init(key_policy),
+            value=ppo_network.value_network.init(key_value))
     else:
-        init_params = NetworkParams(
-            policy=network.policy_network.init(key_policy),
-            value=network.value_network.init(key_value))
+        init_params = PPONetworkParams(
+            policy=ppo_network.policy_network.init(key_policy),
+            value=ppo_network.value_network.init(key_value))
     training_state = TrainingState(  # pytype: disable=wrong-arg-types  # jax-ndarray
         optimizer_state=optimizer.init(init_params),  # pytype: disable=wrong-arg-types  # numpy-scalars
         params=init_params,
@@ -994,6 +655,7 @@ def main(_):
             clip_obs=Config.clip_observations,
             clip_rewards=Config.clip_rewards,
             evaluate=True,
+            capture_video=Config.capture_video,
         )
         eval_env.seed(int(eval_key[0]))
         eval_state = eval_env.reset()
@@ -1060,7 +722,6 @@ def main(_):
         # as function 
         keys_sgd = jax.random.split(key_sgd, local_devices_to_use)
         new_training_state, metrics = learn(data=data, training_state=training_state, key_sgd=keys_sgd)
-
     
         # logging     
         training_state, env_state, metrics = _strip_weak_type((new_training_state, env_state, metrics))
@@ -1120,7 +781,7 @@ def main(_):
                 'eval/eval_time': eval_time,
             }
             logging.info(eval_metrics)
-            scores.append((global_step, np.mean(eval_returns), np.mean(eval_ep_lengths), metrics['training/kl_div']))
+            scores.append((global_step, np.mean(eval_returns), np.mean(eval_ep_lengths), metrics['training/approx_kl']))
         
     logging.info('TRAINING END: training duration: %s', time.time() - start_time)
 
@@ -1183,6 +844,8 @@ def main(_):
         print(f"model saved to {model_path}")
 
     envs.close()
+    
+    return scores, training_walltime, metrics, eval_metrics
 
 
 if __name__ == "__main__":

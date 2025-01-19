@@ -8,9 +8,9 @@ import jax.numpy as jnp
 import numpy as np
 from gymnasium import spaces
 
-from envs.base import VecEnv, VecEnvWrapper
-from envs.state import State
-from envs.utils import check_shape_equal, is_image_space
+from .base import VecEnv, VecEnvWrapper
+from .state import State
+from .utils import check_shape_equal, is_image_space
 
 
 

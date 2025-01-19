@@ -38,7 +38,7 @@ Prerequisites:
 To run the algorithms locally, simply run the respective python file:
 
 ```bash
-python ppo.py
+python policy_gradients_jax/ppo.py
 ```
 
 

@@ -19,10 +19,10 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 
-from envs import make_env, Transition, has_discrete_action_space, is_atari_env
-from networks.policy import Policy
-from networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
-from networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
+from .envs import make_env, Transition, has_discrete_action_space, is_atari_env
+from .networks.policy import Policy
+from .networks.networks import FeedForwardNetwork, ActivationFn, make_policy_network, make_value_network, make_atari_feature_extractor
+from .networks.distributions import NormalTanhDistribution, ParametricDistribution, PolicyNormalDistribution, DiscreteDistribution
 
 class Config:
     # experiment
@@ -461,7 +461,7 @@ def main(_):
     if Config.write_logs_to_file:
         from absl import flags
         flags.FLAGS.alsologtostderr = True
-        log_path = f'./training_logs/vmpo/{run_name}'
+        log_path = f'./.training_logs/vmpo/{run_name}'
         if not os.path.exists(log_path):
             os.makedirs(log_path)
         logging.get_absl_handler().use_absl_log_file('logs', log_path)
@@ -919,6 +919,8 @@ def main(_):
         print(f"model saved to {model_path}")
 
     envs.close()
+    
+    return scores, training_walltime, metrics, eval_metrics
 
 
 if __name__ == "__main__":

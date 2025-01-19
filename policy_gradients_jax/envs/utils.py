@@ -5,7 +5,7 @@ import warnings
 from gymnasium import spaces
 import numpy as np
 
-from envs.base import VecEnvObs
+from .base import VecEnvObs
 
 
 

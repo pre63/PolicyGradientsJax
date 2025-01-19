@@ -2,16 +2,16 @@ from typing import Any, List, Optional, Union
 
 import gymnasium as gym
 
-from envs.atari_wrappers import ( 
+from .atari_wrappers import ( 
     ClipRewardEnv,
     EpisodicLifeEnv,
     FireResetEnv,
     MaxAndSkipEnv,
     NoopResetEnv,
 )
-from envs.batched_env import SequencedBatchedEnv, ParallelBatchedEnv
-from envs.evaluate import RecordScores, Evaluator
-from envs.normalize import VecNormalize
+from .batched_env import SequencedBatchedEnv, ParallelBatchedEnv
+from .evaluate import RecordScores, Evaluator
+from .normalize import VecNormalize
 
 
 

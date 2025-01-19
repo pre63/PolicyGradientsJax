@@ -9,15 +9,15 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
-from envs.base import (
+from .base import (
     CloudpickleWrapper,
     VecEnv,
     VecEnvIndices,
     VecEnvObs,
     VecEnvStepReturn,
 )
-from envs.state import State
-from envs.utils import copy_obs_dict, dict_to_obs, obs_space_info
+from .state import State
+from .utils import copy_obs_dict, dict_to_obs, obs_space_info
 
 
 
