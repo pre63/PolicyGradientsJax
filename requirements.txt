@@ -6,9 +6,10 @@ flax
 mujoco-py
 gymnasium
 gymnasium[mujoco]
+gymnasium[other]
 isort
-jax
+jax[cuda12]==0.5.0
 numpy
 optax
+scipy
 setuptools
-torch

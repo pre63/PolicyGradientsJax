@@ -1,10 +1,11 @@
 """Probability distributions in JAX."""
 
 import abc
+
 import jax
 import jax.numpy as jnp
+from scipy.stats import rv_discrete
 # import tensorflow_probability.substrates.jax.distributions as tfd
-from torch.distributions import Categorical, kl_divergence
 
 
 class ParametricDistribution(abc.ABC):
@@ -215,7 +216,7 @@ class PolicyNormalDistribution(ParametricDistribution):
         loc, scale = jnp.split(parameters, 2, axis=-1)
         scale = jax.nn.softplus(scale) + self._min_std
         return NormalDistribution(loc=loc, scale=scale)
-    
+
 
 class DiscreteDistribution(abc.ABC):
     """Discrete (action) distribution."""
@@ -246,8 +247,13 @@ class DiscreteDistribution(abc.ABC):
         return event
 
     def sample_no_postprocessing(self, parameters, seed):
+        """Sample from the categorical distribution."""
         #return tfd.Categorical(logits=parameters).sample(seed=seed)
-        return Categorical(logits=parameters).sample(seed=seed)
+        probabilities = jax.nn.softmax(parameters, axis=-1)
+        rng_key, subkey = jax.random.split(seed)
+        categories = jnp.arange(self._param_size)
+        distribution = rv_discrete(values=(categories, probabilities))
+        return distribution.rvs(size=1, random_state=rng_key)
 
     def sample(self, parameters, seed):
         """Returns a sample from the postprocessed distribution."""
@@ -261,19 +267,21 @@ class DiscreteDistribution(abc.ABC):
     def log_prob(self, parameters, actions):
         """Compute the log probability of actions."""
         #return tfd.Categorical(logits=parameters).log_prob(actions)
-        return Categorical(logits=parameters).log_prob(actions)
+        probabilities = jax.nn.softmax(parameters, axis=-1)
+        return jnp.log(probabilities[jnp.arange(len(actions)), actions])
 
-    def entropy(self, parameters, seed):
+    def entropy(self, parameters, seed=None):
         """Return the entropy of the given distribution."""
         #return tfd.Categorical(logits=parameters).entropy()
-        return Categorical(logits=parameters).entropy()
-    
+        probabilities = jax.nn.softmax(parameters, axis=-1)
+        return -jnp.sum(probabilities * jnp.log(probabilities + 1e-10), axis=-1)
+
     def kl_divergence(self, p_parameters, q_parameters):
         """Return the KL divergence of the given distributions."""
         # p_distribution = tfd.Categorical(logits=p_parameters)
         # q_distribution = tfd.Categorical(logits=q_parameters)
         # return tfd.kl_divergence(p_distribution, q_distribution)
 
-        p_distribution = Categorical(logits=p_parameters)
-        q_distribution = Categorical(logits=q_parameters)
-        return kl_divergence(p_distribution, q_distribution)
+        p_probs = jax.nn.softmax(p_parameters, axis=-1)
+        q_probs = jax.nn.softmax(q_parameters, axis=-1)
+        return jnp.sum(p_probs * (jnp.log(p_probs + 1e-10) - jnp.log(q_probs + 1e-10)), axis=-1)

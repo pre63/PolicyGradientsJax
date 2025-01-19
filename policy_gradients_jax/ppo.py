@@ -34,7 +34,7 @@ class Config:
     save_model = False
 
     # environment
-    env_id = 'Humanoid-v4' 
+    env_id = 'Humanoid-v5' 
     num_envs = 8
     parallel_envs = True 
     clip_actions = False

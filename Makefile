@@ -3,7 +3,7 @@ install:
 	@. .venv/bin/activate && pip install -r requirements.txt
 
 test:
-	@. .venv/bin/activate && PYTHONPATH=. python policy_gradients_jax/ppo.py
+	@. .venv/bin/activate && PYTHONPATH=. python test.py
 
 fix:
 	@. .venv/bin/activate && (black policy_gradients_jax && isort policy_gradients_jax)
