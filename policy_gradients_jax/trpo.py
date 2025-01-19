@@ -685,6 +685,7 @@ def compute_value_loss(
 
 def main(_):
     run_name = f"Exp_{Config.experiment_name}__{Config.env_id}__{Config.seed}__{int(time.time())}"
+    print(f"Run name: {run_name}")
 
     if Config.write_logs_to_file:
         from absl import flags
@@ -940,11 +941,11 @@ def main(_):
         training_state: TrainingState,
         key_sgd: jnp.ndarray,
     ):
+        print("Start learning")
         value_params = deepcopy(training_state.params.value)
         key_policy, key_sgd = jax.random.split(key_sgd)
         (policy_params, _), policy_metrics = policy_sgd_step((training_state.params, key_policy), (), data=data)
         policy_params = policy_params.replace(value=value_params) 
-
 
         (optimizer_state, params, _), metrics = jax.lax.scan(
             partial(

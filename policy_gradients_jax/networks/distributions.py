@@ -3,7 +3,8 @@
 import abc
 import jax
 import jax.numpy as jnp
-import tensorflow_probability.substrates.jax.distributions as tfd
+# import tensorflow_probability.substrates.jax.distributions as tfd
+from torch.distributions import Categorical, kl_divergence
 
 
 class ParametricDistribution(abc.ABC):
@@ -245,7 +246,8 @@ class DiscreteDistribution(abc.ABC):
         return event
 
     def sample_no_postprocessing(self, parameters, seed):
-        return tfd.Categorical(logits=parameters).sample(seed=seed)
+        #return tfd.Categorical(logits=parameters).sample(seed=seed)
+        return Categorical(logits=parameters).sample(seed=seed)
 
     def sample(self, parameters, seed):
         """Returns a sample from the postprocessed distribution."""
@@ -253,18 +255,25 @@ class DiscreteDistribution(abc.ABC):
 
     def mode(self, parameters):
         """Returns the mode of the discrete distribution."""
-        return tfd.Categorical(logits=parameters).mode()
+        #return tfd.Categorical(logits=parameters).mode()
+        return jnp.argmax(parameters, axis=-1)
 
     def log_prob(self, parameters, actions):
         """Compute the log probability of actions."""
-        return tfd.Categorical(logits=parameters).log_prob(actions)
+        #return tfd.Categorical(logits=parameters).log_prob(actions)
+        return Categorical(logits=parameters).log_prob(actions)
 
     def entropy(self, parameters, seed):
         """Return the entropy of the given distribution."""
-        return tfd.Categorical(logits=parameters).entropy()
+        #return tfd.Categorical(logits=parameters).entropy()
+        return Categorical(logits=parameters).entropy()
     
     def kl_divergence(self, p_parameters, q_parameters):
         """Return the KL divergence of the given distributions."""
-        p_distribution = tfd.Categorical(logits=p_parameters)
-        q_distribution = tfd.Categorical(logits=q_parameters)
-        return tfd.kl_divergence(p_distribution, q_distribution)
+        # p_distribution = tfd.Categorical(logits=p_parameters)
+        # q_distribution = tfd.Categorical(logits=q_parameters)
+        # return tfd.kl_divergence(p_distribution, q_distribution)
+
+        p_distribution = Categorical(logits=p_parameters)
+        q_distribution = Categorical(logits=q_parameters)
+        return kl_divergence(p_distribution, q_distribution)
