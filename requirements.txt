@@ -1,5 +1,4 @@
 absl-py
-black
 cloudpickle
 dataclasses
 flax
@@ -13,3 +12,4 @@ numpy
 optax
 scipy
 setuptools
+git+https://github.com/pre63/black.git
