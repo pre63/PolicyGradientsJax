@@ -785,8 +785,8 @@ def main(_):
       pickle.dump(scores, f)
 
   if Config.save_model:
-    model_path = f"weights/{run_name}.params"
-    os.makedirs("weights", exist_ok=True)
+    model_path = f".weights/{run_name}.params"
+    os.makedirs(".weights", exist_ok=True)
     with open(model_path, "wb") as f:
       f.write(
         flax.serialization.to_bytes(
