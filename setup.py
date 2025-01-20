@@ -17,11 +17,14 @@ setup(
         "gymnasium",
         "gymnasium[mujoco]",
         "gymnasium[other]",
-        "jax[cuda12]==0.5.0",
+        "jax>=0.5.0",  # Default to CPU
         "numpy",
         "optax",
         "scipy",
     ],
+    extras_require={
+        "cuda": ["jax[cuda12]==0.5.0"],  # Optional CUDA support
+    },
     classifiers=[
         "Programming Language :: Python :: 3.11",
         "License :: OSI Approved :: MIT License",
