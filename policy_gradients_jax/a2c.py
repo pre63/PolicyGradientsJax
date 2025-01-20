@@ -28,7 +28,6 @@ class Config:
     # experiment
     experiment_name = 'a2c_epochs2_det_1'
     seed = 42
-    platform = 'cpu' # CPU or GPU
     capture_video = False # not implemented
     write_logs_to_file = False
     save_model = False
@@ -808,13 +807,13 @@ def main(_):
 
         # save scores 
         run_dir = os.path.join('experiments', run_name)
-        if not os.path.exists(run_dir):
-            os.makedirs(run_dir)
+        os.makedirs(run_dir, exist_ok=True)
         with open(os.path.join(run_dir, "scores.pkl"), "wb") as f:
             pickle.dump(scores, f)
 
     if Config.save_model:
         model_path = f"weights/{run_name}.params"
+        os.makedirs("weights", exist_ok=True)
         with open(model_path, "wb") as f:
             f.write(
                 flax.serialization.to_bytes(

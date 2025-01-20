@@ -44,8 +44,11 @@ class AtariTorso(linen.Module):
     """ConvNet Feature Extractor."""
     layer_sizes: Sequence[int] = (512,)
     activation: ActivationFn = linen.relu
-    kernel_init: Initializer = jax.nn.initializers.orthogonal(jnp.sqrt(2))
+    kernel_init: Initializer = None
     bias: bool = True
+
+    def setup(self):
+      kernel_init = jax.nn.initializers.orthogonal(jnp.sqrt(2))
 
     @linen.compact
     def __call__(self, data: jnp.ndarray):
